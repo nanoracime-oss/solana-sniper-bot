@@ -34,6 +34,25 @@ import * as fs from 'fs';
 import * as path from 'path'; 
 import { logger } from './core/logger';
 
+// ==========================================
+// نظام إشعارات تيليجرام
+// ==========================================
+async function sendTelegramMessage(text: string) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'HTML', disable_web_page_preview: true })
+    });
+  } catch (e) {
+    console.error("Telegram error:", e);
+  }
+}
+// ==========================================
+
 const network = 'mainnet-beta';
 const RPC_ENDPOINT = retrieveEnvVariable('RPC_ENDPOINT', logger);
 const RPC_WEBSOCKET = retrieveEnvVariable('RPC_WEBSOCKET', logger);
@@ -103,6 +122,9 @@ async function init(): Promise<void> {
   logger.info(`CONNECTED @ ${RPC_ENDPOINT}`);
   logger.info('----------------------------------------------------------');
   logger.info(`Wallet Address: ${wallet.publicKey}`);
+
+  // إرسال رسالة ترحيب لتيليجرام
+  sendTelegramMessage(`🚀 <b>أهلاً بك يا مدير!</b>\nقناص السولانا متصل وجاهز للعمل 🎯\nالمحفظة: <code>${wallet.publicKey}</code>`);
 
   const TOKEN_SYMB = retrieveEnvVariable('TOKEN_SYMB', logger);
   const BUY_AMOUNT = retrieveEnvVariable('BUY_AMOUNT', logger);
@@ -192,20 +214,12 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
     const poolSize = new TokenAmount(quoteToken, poolState.swapQuoteInAmount, true);
     const poolTokenAddress = poolState.baseMint.toString();
 
-    // rug check
-    // await getRugCheck(poolState.baseMint.toString()).then((risk) => {
-    //   if (risk === 'Danger') {
-    //     rugRiskDanger = true;
-    //   }
-    //   rugRisk = risk;
-    // } );
-
     if (poolSize.lt(quoteMinPoolSizeAmount) || rugRiskDanger) {
       logger.warn(`------------------- POOL SKIPPED | (${poolSize.toFixed()} ${quoteToken.symbol}) ------------------- `);
     } else {
       logger.info(`--------------!!!!! POOL SNIPED | (${poolSize.toFixed()} ${quoteToken.symbol}) !!!!!-------------- `);
     }
-    // logger.info(`TOKEN rugcheck.xyz: ${rugRisk}`);
+    
     logger.info(`Pool link: https://dexscreener.com/solana/${id.toString()}`);
     logger.info(`Pool Open Time: ${new Date(parseInt(poolState.poolOpenTime.toString()) * 1000).toLocaleString()}`);
     logger.info(`--------------------- `);
@@ -365,6 +379,10 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
         },
         `Confirmed buy tx... @: ${tokenAccount.buyValue} SOL`,
       );
+
+      // إشعار الشراء
+      sendTelegramMessage(`🟢 <b>تم قنص عملة جديدة!</b>\nالعملة: <code>${accountData.baseMint}</code>\nالسعر: ${tokenAccount.buyValue} SOL\nالرابط: https://dexscreener.com/solana/${accountData.baseMint}`);
+
     } else {
       logger.debug(confirmation.value.err);
       logger.info({ mint: accountData.baseMint, signature }, `Error confirming buy tx`);
@@ -462,6 +480,11 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish,
         },
         `Confirmed sell tx... Sold at: ${value}\tNet Profit: ${netChange * 100}%`,
       );
+
+      // إشعار البيع
+      const emoji = netChange > 0 ? "🤑" : "🔴";
+      sendTelegramMessage(`${emoji} <b>تم بيع العملة!</b>\nالعملة: <code>${mint}</code>\nالنسبة المئوية: ${netChange * 100}%`);
+
       return true;
     } catch (e: any) {
       retries++;
