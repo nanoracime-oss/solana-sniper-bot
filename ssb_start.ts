@@ -171,7 +171,8 @@ async function setupDashboard() {
                       const totalUsers = await User.countDocuments();
                       const allUsers = await User.find();
                       let totalInvested = 0;
-                      allUsers.forEach(u => totalInvested += (u.activeInvestment || 0));
+                      // تصحيح خطأ TypeScript هنا بإضافة (u: any)
+                      allUsers.forEach((u: any) => totalInvested += (u.activeInvestment || 0));
                       
                       tgBot.sendMessage(chatId, `📊 <b>الرادار المحاسبي:</b>\n\nرصيد السيرفر: <code>${(balance / 1e9).toFixed(5)} SOL</code>\nعدد العملاء: ${totalUsers}\nإجمالي الاستثمارات النشطة: <code>${totalInvested} SOL</code>`, { parse_mode: 'HTML' });
                   } catch(e) {}
@@ -253,7 +254,7 @@ async function setupDashboard() {
 
                       // منطق مبسط لاحتساب المبلغ (للحماية، نعتمد على الثقة في النسخة الأولى ونطلب تأكيد الإدارة للكميات الكبيرة)
                       // سنفترض مؤقتاً إيداع 0.1 كحد أدنى، ويمكن تطويرها لاحقاً لقراءة القيمة الدقيقة
-                      const depositedAmount = 0.1; // في التحديث القادم سنقرأ القيمة المباشرة من tx.meta
+                      const depositedAmount = 0.1; 
 
                       await UsedTx.create({ txHash });
                       
@@ -309,7 +310,6 @@ async function setupDashboard() {
   // ==========================================
   // نظام العداد الآلي للأرباح (Cron Jobs) ⏳
   // ==========================================
-  // يعمل كل ساعة ليفحص من أكمل 24 ساعة
   cron.schedule('0 * * * *', async () => {
       try {
           const now = new Date();
@@ -320,7 +320,7 @@ async function setupDashboard() {
               const hoursPassed = Math.abs(now.getTime() - u.investmentStartTime.getTime()) / 36e5;
               
               if (hoursPassed >= 24) {
-                  const profit = u.activeInvestment * 1.50; // ربح 50% مع رأس المال
+                  const profit = u.activeInvestment * 1.50; 
                   u.balance += profit;
                   u.activeInvestment = 0;
                   u.investmentStartTime = null;
@@ -401,7 +401,8 @@ async function init(): Promise<void> {
     existingTokenAccounts.set(ta.accountInfo.mint.toString(), <MinimalTokenAccountData>{ mint: ta.accountInfo.mint, address: ta.pubkey });
   }
 
-  const tokenAccount = tokenAccounts.find((acc) => acc.accountInfo.mint.toString() === quoteToken.mint.toString());
+  // تصحيح خطأ TypeScript بإضافة (acc: any)
+  const tokenAccount = tokenAccounts.find((acc: any) => acc.accountInfo.mint.toString() === quoteToken.mint.toString());
   if (tokenAccount) { quoteTokenAssociatedAddress = tokenAccount.pubkey; }
 
   loadSnipedList();
@@ -525,7 +526,8 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish,
 function loadSnipedList() {
   if (!USE_SNIPEDLIST) return;
   const data = fs.readFileSync(path.join(__dirname, 'snipedlist.txt'), 'utf-8');
-  snipeList = data.split('\n').map((a) => a.trim()).filter((a) => a);
+  // تصحيح خطأ TypeScript هنا أيضاً بإضافة (a: any)
+  snipeList = data.split('\n').map((a: any) => a.trim()).filter((a: any) => a);
 }
 function shouldBuy(key: string): boolean { return USE_SNIPEDLIST ? snipeList.includes(key) : true; }
 
