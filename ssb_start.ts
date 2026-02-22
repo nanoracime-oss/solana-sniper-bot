@@ -40,22 +40,38 @@ const TelegramBot = require('node-telegram-bot-api');
 const mongoose = require('mongoose');
 
 // ==========================================
-// إعدادات المنصة والإدارة (SaaS Dashboard)
+// الإعدادات الديناميكية (Dynamic Settings)
 // ==========================================
-let isBotRunning = false; // البوت يبدأ متوقفاً لحماية الرصيد
+let isBotRunning = false; 
+let DYNAMIC_TP = Number(retrieveEnvVariable('TAKE_PROFIT', logger));
+let DYNAMIC_SL = Number(retrieveEnvVariable('STOP_LOSS', logger));
+let DYNAMIC_BUY_AMOUNT = retrieveEnvVariable('BUY_AMOUNT', logger);
+
+// ==========================================
+// نظام إدارة الحالة (State Management)
+// ==========================================
 let tgBot: any;
 const adminChatId = process.env.TELEGRAM_CHAT_ID;
+const PUBLIC_CHANNEL = process.env.PUBLIC_CHANNEL_ID || ""; // أضف معرف قناتك لاحقاً هنا
+const userStates: Record<string, string> = {}; 
 
-// تجهيز قاعدة البيانات للمستثمرين
-const InvestorSchema = new mongoose.Schema({
-    chatId: String,
+// ==========================================
+// هندسة قاعدة البيانات (MongoDB Schemas)
+// ==========================================
+const UserSchema = new mongoose.Schema({
+    chatId: { type: String, unique: true },
     walletAddress: String,
-    investedAmount: Number,
-    status: String,
+    balance: { type: Number, default: 0 },
+    activeInvestment: { type: Number, default: 0 },
+    referredBy: String,
+    referralEarnings: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now }
 });
-const Investor = mongoose.model('Investor', InvestorSchema);
+const User = mongoose.model('User', UserSchema);
 
+// ==========================================
+// المحرك التفاعلي (Telegram SaaS Engine)
+// ==========================================
 async function setupDashboard() {
   const mongoUri = process.env.MONGODB_URI;
   if (mongoUri) {
@@ -71,61 +87,165 @@ async function setupDashboard() {
   if (token) {
       tgBot = new TelegramBot(token, {polling: true});
 
+      // --- واجهة المدير (Admin Dashboard) ---
       const sendAdminMenu = (chatId: string) => {
           const options = {
               reply_markup: {
                   inline_keyboard: [
-                      [{ text: '▶️ تشغيل القناص', callback_data: 'start_sniper' }, { text: '⏸️ إيقاف القناص', callback_data: 'stop_sniper' }],
-                      [{ text: '💰 رصيد المحفظة', callback_data: 'check_balance' }, { text: '📊 إحصائيات النظام', callback_data: 'system_stats' }]
+                      [{ text: isBotRunning ? '🛑 إيقاف القناص' : '▶️ تشغيل القناص', callback_data: 'toggle_sniper' }],
+                      [{ text: `تعديل الربح (${DYNAMIC_TP}%)`, callback_data: 'edit_tp' }, { text: `تعديل المخاطرة (${DYNAMIC_SL}%)`, callback_data: 'edit_sl' }],
+                      [{ text: `مبلغ الشراء (${DYNAMIC_BUY_AMOUNT} SOL)`, callback_data: 'edit_buy' }],
+                      [{ text: '📡 إرسال رسالة للمستثمرين', callback_data: 'broadcast_msg' }],
+                      [{ text: '👥 إدارة العملاء', callback_data: 'admin_users' }, { text: '💰 الرادار المالي', callback_data: 'admin_radar' }]
                   ]
               }
           };
-          tgBot.sendMessage(chatId, "👑 <b>لوحة تحكم المدير</b>\nتحكم في إمبراطوريتك من هنا:", {parse_mode: 'HTML', ...options});
+          tgBot.sendMessage(chatId, "👑 <b>غرفة العمليات المركزية</b>\nتحكم في نظامك بالكامل من هنا:", {parse_mode: 'HTML', ...options});
       };
 
-      tgBot.onText(/\/start/, (msg: any) => {
+      // --- واجهة المستثمر (Investor Dashboard) ---
+      const sendUserMenu = async (chatId: string, refCode?: string) => {
+          let user = await User.findOne({ chatId });
+          if (!user) {
+              user = new User({ chatId, referredBy: refCode || "none" });
+              await user.save();
+              if(adminChatId) tgBot.sendMessage(adminChatId, `👥 مستثمر جديد انضم للمنصة!`);
+          }
+
+          const options = {
+              reply_markup: {
+                  inline_keyboard: [
+                      [{ text: '🚀 استثمر الآن (ربح 50% / 24س)', callback_data: 'user_invest' }],
+                      [{ text: '💰 رصيدي', callback_data: 'user_balance' }, { text: '💸 سحب الأرباح', callback_data: 'user_withdraw' }],
+                      [{ text: '🔗 رابط الإحالة (شارك واربح 5%)', callback_data: 'user_referral' }]
+                  ]
+              }
+          };
+          tgBot.sendMessage(chatId, `👋 <b>أهلاً بك في منصة القنص الذكي!</b>\n\nصندوق استثماري يعمل بالذكاء الاصطناعي لاقتناص عملات السولانا وتحقيق أرباح يومية.\n\nاختر من القائمة أدناه:`, {parse_mode: 'HTML', ...options});
+      };
+
+      // استلام الأوامر النصية
+      tgBot.onText(/\/start(.*)/, (msg: any, match: any) => {
           const chatId = msg.chat.id.toString();
+          const refCode = match[1] ? match[1].trim() : undefined;
+
           if (chatId === adminChatId) {
               sendAdminMenu(chatId);
           } else {
-              tgBot.sendMessage(chatId, "👋 أهلاً بك في منصة الاستثمار الذكي.\nالمنصة حالياً في الوضع التجريبي (Beta). سيتم فتح باب الاستثمار قريباً جداً! 🚀");
+              sendUserMenu(chatId, refCode);
           }
       });
 
-      tgBot.on('callback_query', async (query: any) => {
-          const chatId = query.message.chat.id.toString();
-          if (chatId !== adminChatId) return;
+      // التقاط الرسائل النصية للإعدادات الديناميكية والردود
+      tgBot.on('message', async (msg: any) => {
+          const chatId = msg.chat.id.toString();
+          const text = msg.text;
+          if (!text || text.startsWith('/')) return;
 
-          if (query.data === 'start_sniper') {
-              isBotRunning = true;
-              tgBot.sendMessage(chatId, "🟢 <b>تم تشغيل القناص!</b>\nالبوت الآن يراقب شبكة سولانا بحثاً عن صفقات.", {parse_mode: 'HTML'});
-          }
-          else if (query.data === 'stop_sniper') {
-              isBotRunning = false;
-              tgBot.sendMessage(chatId, "🔴 <b>تم إيقاف القناص!</b>\nالبوت في وضع الاستراحة ولن يقوم بأي عملية شراء.", {parse_mode: 'HTML'});
-          }
-          else if (query.data === 'check_balance') {
-              try {
-                  const balance = await solanaConnection.getBalance(wallet.publicKey);
-                  tgBot.sendMessage(chatId, `💰 <b>رصيد الخزنة الرئيسية:</b>\n<code>${(balance / 1e9).toFixed(5)} SOL</code>`, {parse_mode: 'HTML'});
-              } catch(e) {
-                  tgBot.sendMessage(chatId, "❌ حدث خطأ في جلب الرصيد.");
+          const state = userStates[chatId];
+          if (!state) return;
+
+          if (chatId === adminChatId) {
+              if (state === 'WAITING_FOR_TP') {
+                  DYNAMIC_TP = Number(text);
+                  tgBot.sendMessage(chatId, `✅ تم تحديث نسبة الربح إلى: ${DYNAMIC_TP}%`);
+              } else if (state === 'WAITING_FOR_SL') {
+                  DYNAMIC_SL = Number(text);
+                  tgBot.sendMessage(chatId, `✅ تم تحديث نسبة وقف الخسارة إلى: ${DYNAMIC_SL}%`);
+              } else if (state === 'WAITING_FOR_BUY_AMT') {
+                  DYNAMIC_BUY_AMOUNT = text;
+                  updateQuoteAmount(); // دالة لتحديث كمية الشراء في المحرك
+                  tgBot.sendMessage(chatId, `✅ تم تحديث مبلغ الشراء إلى: ${DYNAMIC_BUY_AMOUNT} SOL`);
+              } else if (state === 'WAITING_FOR_BROADCAST') {
+                  const users = await User.find({});
+                  let count = 0;
+                  for(let u of users) {
+                      if(u.chatId !== adminChatId) {
+                          tgBot.sendMessage(u.chatId, `📢 <b>إعلان من الإدارة:</b>\n${text}`, {parse_mode: 'HTML'}).catch(()=>{});
+                          count++;
+                      }
+                  }
+                  tgBot.sendMessage(chatId, `✅ تم إرسال الرسالة إلى ${count} مستثمر.`);
+              }
+              delete userStates[chatId];
+              setTimeout(() => sendAdminMenu(chatId), 1000);
+          } else {
+              if (state === 'WAITING_FOR_TX_HASH') {
+                  tgBot.sendMessage(chatId, `⏳ جاري التحقق من المعاملة في شبكة سولانا...\n<code>${text}</code>\n\n<i>(النظام في وضع التجربة حالياً، سيتم تأكيد الإيداع التلقائي في التحديث القادم)</i>`, {parse_mode: 'HTML'});
+                  delete userStates[chatId];
               }
           }
-          else if (query.data === 'system_stats') {
-               const dbState = mongoose.connection.readyState === 1 ? '✅ متصلة' : '❌ غير متصلة';
-               const botState = isBotRunning ? '🟢 يعمل بقوة' : '🔴 متوقف (وضع السبات)';
-               tgBot.sendMessage(chatId, `📊 <b>تقرير النظام الفوري:</b>\n\nحالة المحرك: ${botState}\nقاعدة البيانات: ${dbState}\nنسبة الربح: ${TAKE_PROFIT}%\nنسبة الخسارة: ${STOP_LOSS}%`, {parse_mode: 'HTML'});
+      });
+
+      // التفاعل مع الأزرار (Callback Queries)
+      tgBot.on('callback_query', async (query: any) => {
+          const chatId = query.message.chat.id.toString();
+          const data = query.data;
+
+          // --- أزرار الإدارة ---
+          if (chatId === adminChatId) {
+              if (data === 'toggle_sniper') {
+                  isBotRunning = !isBotRunning;
+                  tgBot.sendMessage(chatId, isBotRunning ? "🟢 <b>تم تشغيل القناص!</b>" : "🔴 <b>تم إيقاف القناص!</b>", {parse_mode: 'HTML'});
+                  sendAdminMenu(chatId);
+              }
+              else if (data === 'edit_tp') {
+                  userStates[chatId] = 'WAITING_FOR_TP';
+                  tgBot.sendMessage(chatId, "أرسل نسبة الربح الجديدة (مثال: 100):");
+              }
+              else if (data === 'edit_sl') {
+                  userStates[chatId] = 'WAITING_FOR_SL';
+                  tgBot.sendMessage(chatId, "أرسل نسبة وقف الخسارة (مثال: -30):");
+              }
+              else if (data === 'edit_buy') {
+                  userStates[chatId] = 'WAITING_FOR_BUY_AMT';
+                  tgBot.sendMessage(chatId, "أرسل مبلغ الشراء الجديد بالسولانا (مثال: 0.1):");
+              }
+              else if (data === 'broadcast_msg') {
+                  userStates[chatId] = 'WAITING_FOR_BROADCAST';
+                  tgBot.sendMessage(chatId, "أرسل الرسالة التي تريد تعميمها لجميع المستثمرين:");
+              }
+              else if (data === 'admin_radar') {
+                  try {
+                      const balance = await solanaConnection.getBalance(wallet.publicKey);
+                      const totalUsers = await User.countDocuments();
+                      tgBot.sendMessage(chatId, `📊 <b>الرادار المالي:</b>\n\nرصيد السيرفر الرئيسي: <code>${(balance / 1e9).toFixed(5)} SOL</code>\nعدد العملاء المسجلين: ${totalUsers}`, {parse_mode: 'HTML'});
+                  } catch(e) {}
+              }
+          } 
+          // --- أزرار المستثمرين ---
+          else {
+              let user = await User.findOne({ chatId });
+              if (data === 'user_invest') {
+                  const depositAddress = wallet.publicKey.toString(); // عنوان محفظتك
+                  tgBot.sendMessage(chatId, `🚀 <b>خطة 24 ساعة (ربح مستهدف 50%)</b>\n\nللبدء، قم بإرسال السولانا (SOL) إلى محفظة المنصة الآمنة:\n\n<code>${depositAddress}</code>\n\nالحد الأدنى للاستثمار: 0.1 SOL\n\n⚠️ <b>بعد الإرسال:</b> اضغط على الزر أدناه لتأكيد الإيداع.`, {
+                      parse_mode: 'HTML',
+                      reply_markup: { inline_keyboard: [[{ text: '✅ تأكيد الإيداع (إرسال Hash)', callback_data: 'confirm_deposit' }]] }
+                  });
+              }
+              else if (data === 'confirm_deposit') {
+                  userStates[chatId] = 'WAITING_FOR_TX_HASH';
+                  tgBot.sendMessage(chatId, "يرجى إرسال شفرة المعاملة (TX Hash) للتحقق منها فوراً من شبكة البلوكشين:");
+              }
+              else if (data === 'user_balance') {
+                  tgBot.sendMessage(chatId, `💰 <b>محفظتك الاستثمارية:</b>\n\nالرصيد المتاح للسحب: <code>${user?.balance || 0} SOL</code>\nالاستثمار النشط: <code>${user?.activeInvestment || 0} SOL</code>\nأرباح الإحالة: <code>${user?.referralEarnings || 0} SOL</code>`, {parse_mode: 'HTML'});
+              }
+              else if (data === 'user_referral') {
+                  const botUsername = (await tgBot.getMe()).username;
+                  const refLink = `https://t.me/${botUsername}?start=${chatId}`;
+                  tgBot.sendMessage(chatId, `🔗 <b>نظام الإحالة الفيروسي:</b>\n\nشارك هذا الرابط مع أصدقائك واحصل على <b>5% عمولة</b> من أي إيداع يقومون به، تضاف لرصيدك فوراً!\n\nرابطك الخاص:\n<code>${refLink}</code>`, {parse_mode: 'HTML'});
+              }
           }
           tgBot.answerCallbackQuery(query.id);
       });
   }
 }
 
-function sendTelegramMessage(text: string) {
-  if (tgBot && adminChatId) {
-      tgBot.sendMessage(adminChatId, text, { parse_mode: 'HTML', disable_web_page_preview: true }).catch((e:any) => console.log(e));
-  }
+// دالة إرسال الإشعارات للقناة العامة (الشفافية) والمدير
+function broadcastToChannelAndAdmin(text: string) {
+  if (!tgBot) return;
+  if (adminChatId) tgBot.sendMessage(adminChatId, text, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(()=>{});
+  if (PUBLIC_CHANNEL) tgBot.sendMessage(PUBLIC_CHANNEL, text, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(()=>{});
 }
 // ==========================================
 
@@ -157,8 +277,6 @@ let quoteMinPoolSizeAmount: TokenAmount;
 let quoteMaxPoolSizeAmount: TokenAmount;
 let commitment: Commitment = retrieveEnvVariable('COMMITMENT_LEVEL', logger) as Commitment;
 const ENABLE_BUY = retrieveEnvVariable('ENABLE_BUY', logger) === 'true';
-const TAKE_PROFIT = Number(retrieveEnvVariable('TAKE_PROFIT', logger));
-const STOP_LOSS = Number(retrieveEnvVariable('STOP_LOSS', logger));
 const MINT_IS_RENOUNCED = retrieveEnvVariable('MINT_IS_RENOUNCED', logger) === 'true';
 const USE_SNIPEDLIST = retrieveEnvVariable('USE_SNIPEDLIST', logger) === 'true';
 const SNIPE_LIST_REFRESH_INTERVAL = Number(retrieveEnvVariable('SNIPE_LIST_REFRESH_INTERVAL', logger));
@@ -169,66 +287,33 @@ const MAX_POOL_SIZE = retrieveEnvVariable('MAX_POOL_SIZE', logger);
 
 let snipeList: string[] = [];
 
+// تحديث قيمة الشراء من التليجرام
+function updateQuoteAmount() {
+    if(quoteToken) {
+        quoteAmount = new TokenAmount(quoteToken, DYNAMIC_BUY_AMOUNT, false);
+    }
+}
+
 async function init(): Promise<void> {
-
-  logger.info(`
-
-                                    EARLY ACCESS - USE AT YOUR OWN RISK
-
-
-             _____/\\\\\\\\\\\_________/\\\\\__________/\\\\\\\\\_______/\\\\\\\\\_____        
-              ___/\\\/////////\\\_____/\\\///\\\______/\\\\\\\\\\\\\___/\\\///////\\\___       
-               __\//\\\______\///____/\\\/__\///\\\___/\\\/////////\\\_\/\\\_____\/\\\___      
-                ___\////\\\__________/\\\______\//\\\_\/\\\_______\/\\\_\/\\\\\\\\\\\/____     
-                 ______\////\\\______\/\\\_______\/\\\_\/\\\\\\\\\\\\\\\_\/\\\//////\\\____    
-                  _________\////\\\___\//\\\______/\\\__\/\\\/////////\\\_\/\\\____\//\\\___   
-                   __/\\\______\//\\\___\///\\\__/\\\____\/\\\_______\/\\\_\/\\\_____\//\\\__  
-                    _\///\\\\\\\\\\\/______\///\\\\\/_____\/\\\_______\/\\\_\/\\\______\//\\\_ 
-                     ___\///////////__________\/////_______\///________\///__\///________\///__
-                                   
-
-                                            SoaR v.2.0 (SaaS Edition)
-
-                              -------- RUNNING | CTRL+C TO STOP IT --------
-  `);
-
   const MY_PRIVATE_KEY = retrieveEnvVariable('MY_PRIVATE_KEY', logger);
   wallet = Keypair.fromSecretKey(bs58.decode(MY_PRIVATE_KEY));
 
-  logger.info(`CONNECTED @ ${RPC_ENDPOINT}`);
-  logger.info('----------------------------------------------------------');
-  logger.info(`Wallet Address: ${wallet.publicKey}`);
-
-  sendTelegramMessage(`🚀 <b>تم إقلاع سيرفر القنص بنجاح!</b>\nأرسل /start لفتح لوحة التحكم والتفاعل مع الأزرار.`);
-
   const TOKEN_SYMB = retrieveEnvVariable('TOKEN_SYMB', logger);
-  const BUY_AMOUNT = retrieveEnvVariable('BUY_AMOUNT', logger);
   switch (TOKEN_SYMB) {
     case 'WSOL': {
       quoteToken = Token.WSOL;
-      quoteAmount = new TokenAmount(Token.WSOL, BUY_AMOUNT, false);
       quoteMinPoolSizeAmount = new TokenAmount(quoteToken, MIN_POOL_SIZE, false);
       quoteMaxPoolSizeAmount = new TokenAmount(quoteToken, MAX_POOL_SIZE, false);
       break;
     }
     case 'USDC': {
-      quoteToken = new Token(
-        TOKEN_PROGRAM_ID,
-        new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),
-        6,
-        'USDC',
-        'USDC',
-      );
-      quoteAmount = new TokenAmount(quoteToken, BUY_AMOUNT, false);
+      quoteToken = new Token(TOKEN_PROGRAM_ID, new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'), 6, 'USDC', 'USDC');
       break;
     }
-    default: {
-      throw new Error(`Unsupported "${TOKEN_SYMB}"! ONLY USDC or WSOL`);
-    }
   }
+  updateQuoteAmount();
 
   const tokenAccounts = await getTokenAccounts(solanaConnection, wallet.publicKey, commitment);
-
   for (const ta of tokenAccounts) {
     existingTokenAccounts.set(ta.accountInfo.mint.toString(), <MinimalTokenAccountData>{
       mint: ta.accountInfo.mint,
@@ -236,12 +321,8 @@ async function init(): Promise<void> {
     });
   }
 
-  const tokenAccount = tokenAccounts.find((acc) => acc.accountInfo.mint.toString() === quoteToken.mint.toString())!;
-
-  if (!tokenAccount) {
-    logger.error(`---> Put SOL in your wallet and swap SOL to WSOL <---`);
-    // لم نعد نوقف السيرفر هنا بل نتركه يعمل ليستقبل أوامر تيليجرام
-  } else {
+  const tokenAccount = tokenAccounts.find((acc) => acc.accountInfo.mint.toString() === quoteToken.mint.toString());
+  if (tokenAccount) {
       quoteTokenAssociatedAddress = tokenAccount.pubkey;
   }
 
@@ -253,48 +334,30 @@ function saveTokenAccount(mint: PublicKey, accountData: MinimalMarketLayoutV3) {
   const tokenAccount = <MinimalTokenAccountData>{
     address: ata,
     mint: mint,
-    market: <MinimalMarketLayoutV3>{
-      bids: accountData.bids,
-      asks: accountData.asks,
-      eventQueue: accountData.eventQueue,
-    },
+    market: <MinimalMarketLayoutV3>{ bids: accountData.bids, asks: accountData.asks, eventQueue: accountData.eventQueue },
   };
   existingTokenAccounts.set(mint.toString(), tokenAccount);
   return tokenAccount;
 }
 
 export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStateV4) {
-
-  // حماية الاستثمار: لا تفعل شيء إذا كان القناص متوقف من تيليجرام
   if (!isBotRunning) return;
 
-  let rugRiskDanger = false;
-  let rugRisk = 'Unknown';
-
-  if (!shouldBuy(poolState.baseMint.toString())) {
-    return;
-  }
+  if (!shouldBuy(poolState.baseMint.toString())) return;
 
   if (!quoteMinPoolSizeAmount.isZero()) {
     const poolSize = new TokenAmount(quoteToken, poolState.swapQuoteInAmount, true);
-    
-    if (poolSize.lt(quoteMinPoolSizeAmount) || rugRiskDanger) {
-      return;
-    }
-    logger.info(`--------------!!!!! POOL SNIPED | (${poolSize.toFixed()} ${quoteToken.symbol}) !!!!!-------------- `);
+    if (poolSize.lt(quoteMinPoolSizeAmount)) return;
   }
 
   if (MINT_IS_RENOUNCED) {
     const mintOption = await checkMintable(poolState.baseMint);
-    if (mintOption !== true) {
-      return;
-    }
+    if (mintOption !== true) return;
   }
 
   if (ENABLE_BUY && quoteTokenAssociatedAddress) {
     await buy(id, poolState);
   }
-
 }
 
 export async function checkMintable(vault: PublicKey): Promise<boolean | undefined> {
@@ -303,8 +366,7 @@ export async function checkMintable(vault: PublicKey): Promise<boolean | undefin
     if (!data) return;
     const deserialize = MintLayout.decode(data);
     return deserialize.mintAuthorityOption === 0;
-  } catch (e) {
-  }
+  } catch (e) {}
 }
 
 export async function processOpenBookMarket(updatedAccountInfo: KeyedAccountInfo) {
@@ -312,79 +374,50 @@ export async function processOpenBookMarket(updatedAccountInfo: KeyedAccountInfo
   let accountData: MarketStateV3 | undefined;
   try {
     accountData = MARKET_STATE_LAYOUT_V3.decode(updatedAccountInfo.accountInfo.data);
-    if (existingTokenAccounts.has(accountData.baseMint.toString())) {
-      return;
-    }
+    if (existingTokenAccounts.has(accountData.baseMint.toString())) return;
     saveTokenAccount(accountData.baseMint, accountData);
-  } catch (e) {
-  }
+  } catch (e) {}
 }
 
 async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise<void> {
   try {
     let tokenAccount = existingTokenAccounts.get(accountData.baseMint.toString());
-
     if (!tokenAccount) {
       const market = await getMinimalMarketV3(solanaConnection, accountData.marketId, commitment);
       tokenAccount = saveTokenAccount(accountData.baseMint, market);
     }
-
     tokenAccount.poolKeys = createPoolKeys(accountId, accountData, tokenAccount.market!);
     const { innerTransaction } = Liquidity.makeSwapFixedInInstruction(
       {
         poolKeys: tokenAccount.poolKeys,
-        userKeys: {
-          tokenAccountIn: quoteTokenAssociatedAddress,
-          tokenAccountOut: tokenAccount.address,
-          owner: wallet.publicKey,
-        },
+        userKeys: { tokenAccountIn: quoteTokenAssociatedAddress, tokenAccountOut: tokenAccount.address, owner: wallet.publicKey },
         amountIn: quoteAmount.raw,
         minAmountOut: 0,
       },
       tokenAccount.poolKeys.version,
     );
 
-    const latestBlockhash = await solanaConnection.getLatestBlockhash({
-      commitment: commitment,
-    });
+    const latestBlockhash = await solanaConnection.getLatestBlockhash({ commitment: commitment });
     const messageV0 = new TransactionMessage({
       payerKey: wallet.publicKey,
       recentBlockhash: latestBlockhash.blockhash,
       instructions: [
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 421197 }),
         ComputeBudgetProgram.setComputeUnitLimit({ units: 101337 }),
-        createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey,
-          tokenAccount.address,
-          wallet.publicKey,
-          accountData.baseMint,
-        ),
+        createAssociatedTokenAccountIdempotentInstruction(wallet.publicKey, tokenAccount.address, wallet.publicKey, accountData.baseMint),
         ...innerTransaction.instructions,
       ],
     }).compileToV0Message();
     const transaction = new VersionedTransaction(messageV0);
     transaction.sign([wallet, ...innerTransaction.signers]);
     const rawTransaction = transaction.serialize();
-    const signature = await retry(
-    () =>
-      solanaConnection.sendRawTransaction(rawTransaction, {
-        skipPreflight: true,
-      }),
-    { retryIntervalMs: 10, retries: 50 },
-  );
-    const confirmation = await solanaConnection.confirmTransaction(
-      {
-        signature,
-        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        blockhash: latestBlockhash.blockhash,
-      },
-      commitment,
-    );
+    const signature = await retry(() => solanaConnection.sendRawTransaction(rawTransaction, { skipPreflight: true }), { retryIntervalMs: 10, retries: 50 });
+    
+    const confirmation = await solanaConnection.confirmTransaction({ signature, lastValidBlockHeight: latestBlockhash.lastValidBlockHeight, blockhash: latestBlockhash.blockhash }, commitment);
+    
     const basePromise = solanaConnection.getTokenAccountBalance(accountData.baseVault, commitment);
     const quotePromise = solanaConnection.getTokenAccountBalance(accountData.quoteVault, commitment);
-
     await Promise.all([basePromise, quotePromise]);
-
     const baseValue = await basePromise;
     const quoteValue = await quotePromise;
 
@@ -392,42 +425,32 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
       tokenAccount.buyValue = quoteValue?.value?.uiAmount / baseValue?.value?.uiAmount;
     
     if (!confirmation.value.err) {
-      sendTelegramMessage(`🟢 <b>تم قنص عملة جديدة!</b>\nالعملة: <code>${accountData.baseMint}</code>\nالسعر: ${tokenAccount.buyValue} SOL\nالرابط: https://dexscreener.com/solana/${accountData.baseMint}`);
+      broadcastToChannelAndAdmin(`🎯 <b>تم قنص عملة جديدة آلياً!</b>\nالعملة: <code>${accountData.baseMint}</code>\nالسعر: ${tokenAccount.buyValue} SOL\nالرابط: https://dexscreener.com/solana/${accountData.baseMint}`);
     } 
-  } catch (e) {
-  }
+  } catch (e) {}
 }
 
 async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish, value: number): Promise<boolean> {
   let retries = 0;
-
   do {
     try {
       const tokenAccount = existingTokenAccounts.get(mint.toString());
-      if (!tokenAccount || !tokenAccount.poolKeys || amount === 0 || tokenAccount.buyValue === undefined) {
-        return true;
-      }
+      if (!tokenAccount || !tokenAccount.poolKeys || amount === 0 || tokenAccount.buyValue === undefined) return true;
 
       const netChange = (value - tokenAccount.buyValue) / tokenAccount.buyValue;
-      if (netChange > STOP_LOSS && netChange < TAKE_PROFIT) return false;
+      if (netChange > DYNAMIC_SL && netChange < DYNAMIC_TP) return false;
 
       const { innerTransaction } = Liquidity.makeSwapFixedInInstruction(
         {
           poolKeys: tokenAccount.poolKeys!,
-          userKeys: {
-            tokenAccountOut: quoteTokenAssociatedAddress,
-            tokenAccountIn: tokenAccount.address,
-            owner: wallet.publicKey,
-          },
+          userKeys: { tokenAccountOut: quoteTokenAssociatedAddress, tokenAccountIn: tokenAccount.address, owner: wallet.publicKey },
           amountIn: amount,
           minAmountOut: 0,
         },
         tokenAccount.poolKeys!.version,
       );
 
-      const latestBlockhash = await solanaConnection.getLatestBlockhash({
-        commitment: commitment,
-      });
+      const latestBlockhash = await solanaConnection.getLatestBlockhash({ commitment: commitment });
       const messageV0 = new TransactionMessage({
         payerKey: wallet.publicKey,
         recentBlockhash: latestBlockhash.blockhash,
@@ -441,23 +464,13 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish,
       
       const transaction = new VersionedTransaction(messageV0);
       transaction.sign([wallet, ...innerTransaction.signers]);
-      const signature = await solanaConnection.sendRawTransaction(transaction.serialize(), {
-        preflightCommitment: commitment,
-      });
-      const confirmation = await solanaConnection.confirmTransaction(
-        {
-          signature,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-          blockhash: latestBlockhash.blockhash,
-        },
-        commitment,
-      );
-      if (confirmation.value.err) {
-        continue;
-      }
+      const signature = await solanaConnection.sendRawTransaction(transaction.serialize(), { preflightCommitment: commitment });
+      const confirmation = await solanaConnection.confirmTransaction({ signature, lastValidBlockHeight: latestBlockhash.lastValidBlockHeight, blockhash: latestBlockhash.blockhash }, commitment);
+      
+      if (confirmation.value.err) continue;
 
-      const emoji = netChange > 0 ? "🤑" : "🔴";
-      sendTelegramMessage(`${emoji} <b>تم بيع العملة!</b>\nالعملة: <code>${mint}</code>\nالنسبة المئوية: ${netChange * 100}%`);
+      const emoji = netChange > 0 ? "🟢🤑" : "🔴";
+      broadcastToChannelAndAdmin(`${emoji} <b>تم بيع العملة بنجاح!</b>\nالعملة: <code>${mint}</code>\nصافي الربح: <b>${(netChange * 100).toFixed(2)}%</b>`);
 
       return true;
     } catch (e: any) {
@@ -468,10 +481,7 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish,
 }
 
 function loadSnipedList() {
-  if (!USE_SNIPEDLIST) {
-    return;
-  }
-  const count = snipeList.length;
+  if (!USE_SNIPEDLIST) return;
   const data = fs.readFileSync(path.join(__dirname, 'snipedlist.txt'), 'utf-8');
   snipeList = data.split('\n').map((a) => a.trim()).filter((a) => a);
 }
@@ -481,7 +491,7 @@ function shouldBuy(key: string): boolean {
 }
 
 const runListener = async () => {
-  await setupDashboard(); // تشغيل لوحة التحكم فوراً
+  await setupDashboard(); 
   await init();
   const runTimestamp = Math.floor(new Date().getTime() / 1000);
   
@@ -530,9 +540,8 @@ const runListener = async () => {
       async (updatedAccountInfo) => {
         if (!quoteTokenAssociatedAddress) return;
         const accountData = AccountLayout.decode(updatedAccountInfo.accountInfo!.data);
-        if (updatedAccountInfo.accountId.equals(quoteTokenAssociatedAddress)) {
-          return;
-        }
+        if (updatedAccountInfo.accountId.equals(quoteTokenAssociatedAddress)) return;
+        
         let completed = false;
         while (!completed) {
           setTimeout(() => {}, 1000);
