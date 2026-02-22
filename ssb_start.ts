@@ -40,6 +40,19 @@ const TelegramBot = require('node-telegram-bot-api');
 const mongoose = require('mongoose');
 
 // ==========================================
+// حل مشكلة Render (السيرفر الوهمي لفتح البورت)
+// ==========================================
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+http.createServer((req: any, res: any) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('SoaR Sniper SaaS is Active! 🎯');
+}).listen(PORT, () => {
+    logger.info(`✅ Dummy Web Server listening on port ${PORT} for Render`);
+});
+// ==========================================
+
+// ==========================================
 // الإعدادات الديناميكية (Dynamic Settings)
 // ==========================================
 let isBotRunning = false; 
