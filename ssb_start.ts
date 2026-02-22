@@ -34,21 +34,97 @@ import * as fs from 'fs';
 import * as path from 'path'; 
 import { logger } from './core/logger';
 
+// @ts-ignore
+const TelegramBot = require('node-telegram-bot-api');
+// @ts-ignore
+const mongoose = require('mongoose');
+
 // ==========================================
-// نظام إشعارات تيليجرام
+// إعدادات المنصة والإدارة (SaaS Dashboard)
 // ==========================================
-async function sendTelegramMessage(text: string) {
+let isBotRunning = false; // البوت يبدأ متوقفاً لحماية الرصيد
+let tgBot: any;
+const adminChatId = process.env.TELEGRAM_CHAT_ID;
+
+// تجهيز قاعدة البيانات للمستثمرين
+const InvestorSchema = new mongoose.Schema({
+    chatId: String,
+    walletAddress: String,
+    investedAmount: Number,
+    status: String,
+    createdAt: { type: Date, default: Date.now }
+});
+const Investor = mongoose.model('Investor', InvestorSchema);
+
+async function setupDashboard() {
+  const mongoUri = process.env.MONGODB_URI;
+  if (mongoUri) {
+      try {
+          await mongoose.connect(mongoUri);
+          logger.info("✅ Connected to MongoDB!");
+      } catch(e) {
+          logger.error("MongoDB Connection Error:", e);
+      }
+  }
+
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'HTML', disable_web_page_preview: true })
-    });
-  } catch (e) {
-    console.error("Telegram error:", e);
+  if (token) {
+      tgBot = new TelegramBot(token, {polling: true});
+
+      const sendAdminMenu = (chatId: string) => {
+          const options = {
+              reply_markup: {
+                  inline_keyboard: [
+                      [{ text: '▶️ تشغيل القناص', callback_data: 'start_sniper' }, { text: '⏸️ إيقاف القناص', callback_data: 'stop_sniper' }],
+                      [{ text: '💰 رصيد المحفظة', callback_data: 'check_balance' }, { text: '📊 إحصائيات النظام', callback_data: 'system_stats' }]
+                  ]
+              }
+          };
+          tgBot.sendMessage(chatId, "👑 <b>لوحة تحكم المدير</b>\nتحكم في إمبراطوريتك من هنا:", {parse_mode: 'HTML', ...options});
+      };
+
+      tgBot.onText(/\/start/, (msg: any) => {
+          const chatId = msg.chat.id.toString();
+          if (chatId === adminChatId) {
+              sendAdminMenu(chatId);
+          } else {
+              tgBot.sendMessage(chatId, "👋 أهلاً بك في منصة الاستثمار الذكي.\nالمنصة حالياً في الوضع التجريبي (Beta). سيتم فتح باب الاستثمار قريباً جداً! 🚀");
+          }
+      });
+
+      tgBot.on('callback_query', async (query: any) => {
+          const chatId = query.message.chat.id.toString();
+          if (chatId !== adminChatId) return;
+
+          if (query.data === 'start_sniper') {
+              isBotRunning = true;
+              tgBot.sendMessage(chatId, "🟢 <b>تم تشغيل القناص!</b>\nالبوت الآن يراقب شبكة سولانا بحثاً عن صفقات.", {parse_mode: 'HTML'});
+          }
+          else if (query.data === 'stop_sniper') {
+              isBotRunning = false;
+              tgBot.sendMessage(chatId, "🔴 <b>تم إيقاف القناص!</b>\nالبوت في وضع الاستراحة ولن يقوم بأي عملية شراء.", {parse_mode: 'HTML'});
+          }
+          else if (query.data === 'check_balance') {
+              try {
+                  const balance = await solanaConnection.getBalance(wallet.publicKey);
+                  tgBot.sendMessage(chatId, `💰 <b>رصيد الخزنة الرئيسية:</b>\n<code>${(balance / 1e9).toFixed(5)} SOL</code>`, {parse_mode: 'HTML'});
+              } catch(e) {
+                  tgBot.sendMessage(chatId, "❌ حدث خطأ في جلب الرصيد.");
+              }
+          }
+          else if (query.data === 'system_stats') {
+               const dbState = mongoose.connection.readyState === 1 ? '✅ متصلة' : '❌ غير متصلة';
+               const botState = isBotRunning ? '🟢 يعمل بقوة' : '🔴 متوقف (وضع السبات)';
+               tgBot.sendMessage(chatId, `📊 <b>تقرير النظام الفوري:</b>\n\nحالة المحرك: ${botState}\nقاعدة البيانات: ${dbState}\nنسبة الربح: ${TAKE_PROFIT}%\nنسبة الخسارة: ${STOP_LOSS}%`, {parse_mode: 'HTML'});
+          }
+          tgBot.answerCallbackQuery(query.id);
+      });
+  }
+}
+
+function sendTelegramMessage(text: string) {
+  if (tgBot && adminChatId) {
+      tgBot.sendMessage(adminChatId, text, { parse_mode: 'HTML', disable_web_page_preview: true }).catch((e:any) => console.log(e));
   }
 }
 // ==========================================
@@ -111,7 +187,7 @@ async function init(): Promise<void> {
                      ___\///////////__________\/////_______\///________\///__\///________\///__
                                    
 
-                                            SoaR v.1.0.0
+                                            SoaR v.2.0 (SaaS Edition)
 
                               -------- RUNNING | CTRL+C TO STOP IT --------
   `);
@@ -123,8 +199,7 @@ async function init(): Promise<void> {
   logger.info('----------------------------------------------------------');
   logger.info(`Wallet Address: ${wallet.publicKey}`);
 
-  // إرسال رسالة ترحيب لتيليجرام
-  sendTelegramMessage(`🚀 <b>أهلاً بك يا مدير!</b>\nقناص السولانا متصل وجاهز للعمل 🎯\nالمحفظة: <code>${wallet.publicKey}</code>`);
+  sendTelegramMessage(`🚀 <b>تم إقلاع سيرفر القنص بنجاح!</b>\nأرسل /start لفتح لوحة التحكم والتفاعل مع الأزرار.`);
 
   const TOKEN_SYMB = retrieveEnvVariable('TOKEN_SYMB', logger);
   const BUY_AMOUNT = retrieveEnvVariable('BUY_AMOUNT', logger);
@@ -152,19 +227,6 @@ async function init(): Promise<void> {
     }
   }
 
-  logger.info(`Snipelist: ${USE_SNIPEDLIST}`);
-  logger.info(`Mint renounced: ${MINT_IS_RENOUNCED}`);
-  logger.info(`Auto sell: ${AUTO_SELL}`);
-  logger.info(`T/P: ${TAKE_PROFIT}%`);
-  logger.info(`S/L: ${STOP_LOSS}%`);
-  logger.info(
-    `Pool size min >: ${quoteMinPoolSizeAmount.isZero() ? 'false' : quoteMinPoolSizeAmount.toFixed()} ${quoteToken.symbol}`,
-  );
-  logger.info(
-    `Pool size max <: ${quoteMaxPoolSizeAmount.isZero() ? 'false' : quoteMaxPoolSizeAmount.toFixed()} ${quoteToken.symbol}`,
-  );
-  logger.info(`Buy amount: ${quoteAmount.toFixed()} ${quoteToken.symbol}`);
-
   const tokenAccounts = await getTokenAccounts(solanaConnection, wallet.publicKey, commitment);
 
   for (const ta of tokenAccounts) {
@@ -177,11 +239,11 @@ async function init(): Promise<void> {
   const tokenAccount = tokenAccounts.find((acc) => acc.accountInfo.mint.toString() === quoteToken.mint.toString())!;
 
   if (!tokenAccount) {
-    logger.error(`---> Put SOL in your wallet and swap SOL to WSOL at https://jup.ag/ <---`);
-    throw new Error(`No ${quoteToken.symbol} token account found in wallet: ${wallet.publicKey}`);
+    logger.error(`---> Put SOL in your wallet and swap SOL to WSOL <---`);
+    // لم نعد نوقف السيرفر هنا بل نتركه يعمل ليستقبل أوامر تيليجرام
+  } else {
+      quoteTokenAssociatedAddress = tokenAccount.pubkey;
   }
-
-  quoteTokenAssociatedAddress = tokenAccount.pubkey;
 
   loadSnipedList();
 }
@@ -203,6 +265,9 @@ function saveTokenAccount(mint: PublicKey, accountData: MinimalMarketLayoutV3) {
 
 export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStateV4) {
 
+  // حماية الاستثمار: لا تفعل شيء إذا كان القناص متوقف من تيليجرام
+  if (!isBotRunning) return;
+
   let rugRiskDanger = false;
   let rugRisk = 'Unknown';
 
@@ -212,59 +277,22 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
 
   if (!quoteMinPoolSizeAmount.isZero()) {
     const poolSize = new TokenAmount(quoteToken, poolState.swapQuoteInAmount, true);
-    const poolTokenAddress = poolState.baseMint.toString();
-
-    if (poolSize.lt(quoteMinPoolSizeAmount) || rugRiskDanger) {
-      logger.warn(`------------------- POOL SKIPPED | (${poolSize.toFixed()} ${quoteToken.symbol}) ------------------- `);
-    } else {
-      logger.info(`--------------!!!!! POOL SNIPED | (${poolSize.toFixed()} ${quoteToken.symbol}) !!!!!-------------- `);
-    }
     
-    logger.info(`Pool link: https://dexscreener.com/solana/${id.toString()}`);
-    logger.info(`Pool Open Time: ${new Date(parseInt(poolState.poolOpenTime.toString()) * 1000).toLocaleString()}`);
-    logger.info(`--------------------- `);
-
     if (poolSize.lt(quoteMinPoolSizeAmount) || rugRiskDanger) {
       return;
     }
-
-    logger.info(`Pool ID: ${id.toString()}`);
-    logger.info(`Pool link: https://dexscreener.com/solana/${id.toString()}`);
-    logger.info(`Pool SOL size: ${poolSize.toFixed()} ${quoteToken.symbol}`);
-    logger.info(`Base Mint: ${poolState.baseMint}`);
-    logger.info(`Pool Status: ${poolState.status}`);
-  }
-
-  if (!quoteMaxPoolSizeAmount.isZero()) {
-    const poolSize = new TokenAmount(quoteToken, poolState.swapQuoteInAmount, true);
-
-    if (poolSize.gt(quoteMaxPoolSizeAmount)) {
-      logger.warn(
-        {
-          mint: poolState.baseMint,
-          pooled: `${poolSize.toFixed()} ${quoteToken.symbol}`,
-        },
-        `Skipping pool, > ${quoteMaxPoolSizeAmount.toFixed()} ${quoteToken.symbol}`,
-        `Swap amount: ${poolSize.toFixed()}`,
-      );
-      logger.info(`---------------------------------------- \n`);
-      return;
-    }
+    logger.info(`--------------!!!!! POOL SNIPED | (${poolSize.toFixed()} ${quoteToken.symbol}) !!!!!-------------- `);
   }
 
   if (MINT_IS_RENOUNCED) {
     const mintOption = await checkMintable(poolState.baseMint);
-
     if (mintOption !== true) {
-      logger.warn('Skipping, owner can mint tokens!');
       return;
     }
   }
 
-  if (ENABLE_BUY) {
+  if (ENABLE_BUY && quoteTokenAssociatedAddress) {
     await buy(id, poolState);
-  } else {
-    logger.info(`--------------- TOKEN BUY ---------------- \n`);
   }
 
 }
@@ -272,30 +300,23 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
 export async function checkMintable(vault: PublicKey): Promise<boolean | undefined> {
   try {
     let { data } = (await solanaConnection.getAccountInfo(vault)) || {};
-    if (!data) {
-      return;
-    }
+    if (!data) return;
     const deserialize = MintLayout.decode(data);
     return deserialize.mintAuthorityOption === 0;
   } catch (e) {
-    logger.debug(e);
-    logger.error({ mint: vault }, `Failed to check renounced mint`);
   }
 }
 
 export async function processOpenBookMarket(updatedAccountInfo: KeyedAccountInfo) {
+  if (!isBotRunning) return;
   let accountData: MarketStateV3 | undefined;
   try {
     accountData = MARKET_STATE_LAYOUT_V3.decode(updatedAccountInfo.accountInfo.data);
-
     if (existingTokenAccounts.has(accountData.baseMint.toString())) {
       return;
     }
-
     saveTokenAccount(accountData.baseMint, accountData);
   } catch (e) {
-    logger.debug(e);
-    logger.error({ mint: accountData?.baseMint }, `Market process failed`);
   }
 }
 
@@ -351,7 +372,6 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
       }),
     { retryIntervalMs: 10, retries: 50 },
   );
-    logger.info({ mint: accountData.baseMint, signature }, `Sent buy tx`);
     const confirmation = await solanaConnection.confirmTransaction(
       {
         signature,
@@ -370,26 +390,11 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
 
     if (baseValue?.value?.uiAmount && quoteValue?.value?.uiAmount)
       tokenAccount.buyValue = quoteValue?.value?.uiAmount / baseValue?.value?.uiAmount;
+    
     if (!confirmation.value.err) {
-      logger.info(
-        {
-          signature,
-          url: `https://solscan.io/tx/${signature}?cluster=${network}`,
-          dex: `https://dexscreener.com/solana/${accountData.baseMint}?maker=${wallet.publicKey}`,
-        },
-        `Confirmed buy tx... @: ${tokenAccount.buyValue} SOL`,
-      );
-
-      // إشعار الشراء
       sendTelegramMessage(`🟢 <b>تم قنص عملة جديدة!</b>\nالعملة: <code>${accountData.baseMint}</code>\nالسعر: ${tokenAccount.buyValue} SOL\nالرابط: https://dexscreener.com/solana/${accountData.baseMint}`);
-
-    } else {
-      logger.debug(confirmation.value.err);
-      logger.info({ mint: accountData.baseMint, signature }, `Error confirming buy tx`);
-    }
+    } 
   } catch (e) {
-    logger.debug(e);
-    logger.error({ mint: accountData.baseMint }, `Failed to buy token`);
   }
 }
 
@@ -399,26 +404,9 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish,
   do {
     try {
       const tokenAccount = existingTokenAccounts.get(mint.toString());
-      if (!tokenAccount) {
+      if (!tokenAccount || !tokenAccount.poolKeys || amount === 0 || tokenAccount.buyValue === undefined) {
         return true;
       }
-
-      if (!tokenAccount.poolKeys) {
-        logger.warn({ mint }, 'No pool keys found');
-        continue;
-      }
-
-      if (amount === 0) {
-        logger.info(
-          {
-            mint: tokenAccount.mint,
-          },
-          `Empty balance, can't sell`,
-        );
-        return true;
-      }
-
-      if (tokenAccount.buyValue === undefined) return true;
 
       const netChange = (value - tokenAccount.buyValue) / tokenAccount.buyValue;
       if (netChange > STOP_LOSS && netChange < TAKE_PROFIT) return false;
@@ -456,7 +444,6 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish,
       const signature = await solanaConnection.sendRawTransaction(transaction.serialize(), {
         preflightCommitment: commitment,
       });
-      logger.info({ mint, signature }, `Sent SELL TX...`);
       const confirmation = await solanaConnection.confirmTransaction(
         {
           signature,
@@ -466,30 +453,15 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish,
         commitment,
       );
       if (confirmation.value.err) {
-        logger.debug(confirmation.value.err);
-        logger.info({ mint, signature }, `Error confirming sell tx`);
         continue;
       }
 
-      logger.info(
-        {
-          mint,
-          signature,
-          url: `https://solscan.io/tx/${signature}?cluster=${network}`,
-          dex: `https://dexscreener.com/solana/${mint}?maker=${wallet.publicKey}`,
-        },
-        `Confirmed sell tx... Sold at: ${value}\tNet Profit: ${netChange * 100}%`,
-      );
-
-      // إشعار البيع
       const emoji = netChange > 0 ? "🤑" : "🔴";
       sendTelegramMessage(`${emoji} <b>تم بيع العملة!</b>\nالعملة: <code>${mint}</code>\nالنسبة المئوية: ${netChange * 100}%`);
 
       return true;
     } catch (e: any) {
       retries++;
-      logger.debug(e);
-      logger.error({ mint }, `Failed to sell token, retry: ${retries}/${MAX_SELL_RETRIES}`);
     }
   } while (retries < MAX_SELL_RETRIES);
   return true;
@@ -499,17 +471,9 @@ function loadSnipedList() {
   if (!USE_SNIPEDLIST) {
     return;
   }
-
   const count = snipeList.length;
   const data = fs.readFileSync(path.join(__dirname, 'snipedlist.txt'), 'utf-8');
-  snipeList = data
-    .split('\n')
-    .map((a) => a.trim())
-    .filter((a) => a);
-
-  if (snipeList.length != count) {
-    logger.info(`Loaded snipe list: ${snipeList.length}`);
-  }
+  snipeList = data.split('\n').map((a) => a.trim()).filter((a) => a);
 }
 
 function shouldBuy(key: string): boolean {
@@ -517,9 +481,11 @@ function shouldBuy(key: string): boolean {
 }
 
 const runListener = async () => {
+  await setupDashboard(); // تشغيل لوحة التحكم فوراً
   await init();
   const runTimestamp = Math.floor(new Date().getTime() / 1000);
-  const raydiumSubscriptionId = solanaConnection.onProgramAccountChange(
+  
+  solanaConnection.onProgramAccountChange(
     RAYDIUM_LIQUIDITY_PROGRAM_ID_V4,
     async (updatedAccountInfo) => {
       const key = updatedAccountInfo.accountId.toString();
@@ -529,59 +495,40 @@ const runListener = async () => {
 
       if (poolOpenTime > runTimestamp && !existing) {
         existingLiquidityPools.add(key);
-        const _ = processRaydiumPool(updatedAccountInfo.accountId, poolState);
+        processRaydiumPool(updatedAccountInfo.accountId, poolState);
       }
     },
     commitment,
     [
       { dataSize: LIQUIDITY_STATE_LAYOUT_V4.span },
-      {
-        memcmp: {
-          offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('quoteMint'),
-          bytes: quoteToken.mint.toBase58(),
-        },
-      },
-      {
-        memcmp: {
-          offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('marketProgramId'),
-          bytes: OPENBOOK_PROGRAM_ID.toBase58(),
-        },
-      },
-      {
-        memcmp: {
-          offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('status'),
-          bytes: bs58.encode([6, 0, 0, 0, 0, 0, 0, 0]),
-        },
-      },
+      { memcmp: { offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('quoteMint'), bytes: quoteToken.mint.toBase58() } },
+      { memcmp: { offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('marketProgramId'), bytes: OPENBOOK_PROGRAM_ID.toBase58() } },
+      { memcmp: { offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('status'), bytes: bs58.encode([6, 0, 0, 0, 0, 0, 0, 0]) } },
     ],
   );
 
-  const openBookSubscriptionId = solanaConnection.onProgramAccountChange(
+  solanaConnection.onProgramAccountChange(
     OPENBOOK_PROGRAM_ID,
     async (updatedAccountInfo) => {
       const key = updatedAccountInfo.accountId.toString();
       const existing = existingOpenBookMarkets.has(key);
       if (!existing) {
         existingOpenBookMarkets.add(key);
-        const _ = processOpenBookMarket(updatedAccountInfo);
+        processOpenBookMarket(updatedAccountInfo);
       }
     },
     commitment,
     [
       { dataSize: MARKET_STATE_LAYOUT_V3.span },
-      {
-        memcmp: {
-          offset: MARKET_STATE_LAYOUT_V3.offsetOf('quoteMint'),
-          bytes: quoteToken.mint.toBase58(),
-        },
-      },
+      { memcmp: { offset: MARKET_STATE_LAYOUT_V3.offsetOf('quoteMint'), bytes: quoteToken.mint.toBase58() } },
     ],
   );
 
   if (AUTO_SELL) {
-    const walletSubscriptionId = solanaConnection.onProgramAccountChange(
+    solanaConnection.onProgramAccountChange(
       TOKEN_PROGRAM_ID,
       async (updatedAccountInfo) => {
+        if (!quoteTokenAssociatedAddress) return;
         const accountData = AccountLayout.decode(updatedAccountInfo.accountInfo!.data);
         if (updatedAccountInfo.accountId.equals(quoteTokenAssociatedAddress)) {
           return;
@@ -591,27 +538,17 @@ const runListener = async () => {
           setTimeout(() => {}, 1000);
           const currValue = await retrieveTokenValueByAddress(accountData.mint.toBase58());
           if (currValue) {
-            logger.info(accountData.mint, `Current Price: ${currValue} SOL`);
             completed = await sell(updatedAccountInfo.accountId, accountData.mint, accountData.amount, currValue);
           } 
         }
       },
       commitment,
       [
-        {
-          dataSize: 165,
-        },
-        {
-          memcmp: {
-            offset: 32,
-            bytes: wallet.publicKey.toBase58(),
-          },
-        },
+        { dataSize: 165 },
+        { memcmp: { offset: 32, bytes: wallet.publicKey.toBase58() } },
       ],
     );
   }
-
-  logger.info('-------------------- SEARCH NEW POOLS --------------------');
 
   if (USE_SNIPEDLIST) {
     setInterval(loadSnipedList, SNIPE_LIST_REFRESH_INTERVAL);
