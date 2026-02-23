@@ -420,7 +420,8 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
     const mintOption = await checkMintable(poolState.baseMint);
     if (mintOption !== true) return;
   }
-  if (ENABLE_BUY && quoteTokenAssociatedAddress) {
+  // التعديل السحري هنا: قمنا بإزالة شرط توفر المحفظة!
+  if (ENABLE_BUY) {
     await buy(id, poolState);
   }
 }
