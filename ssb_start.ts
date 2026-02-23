@@ -100,7 +100,8 @@ const adminKeyboard = {
     reply_markup: {
         keyboard: [
             [{ text: '👑 المحرك' }, { text: '⚙️ التحكم المتقدم (God Mode)' }],
-            [{ text: '📊 الرادار المالي' }, { text: '📡 إرسال تعميم للمستثمرين' }]
+            [{ text: '📊 الرادار المالي' }, { text: '📡 إرسال تعميم للمستثمرين' }],
+            [{ text: '📸 توليد صفقة تسويقية' }] // <-- التعديل السحري هنا
         ],
         resize_keyboard: true,
         persistent: true
@@ -206,6 +207,25 @@ async function setupDashboard() {
                   userStates[chatId] = 'WAITING_FOR_BROADCAST';
                   tgBot.sendMessage(chatId, "أرسل الرسالة التي تريد إرسالها لجميع العملاء:");
               }
+              // --- التعديل السحري لتوليد الصفقات الوهمية يدوياً ---
+              else if (text === '📸 توليد صفقة تسويقية') {
+                  const randomCoins = ["$PEPE_SOL", "$AI_DOGE", "$NINJA", "$SOL_BULL", "$QUANT_X", "$NANO_MEME", "$PUMP_IT", "$DOGE_X"];
+                  const randomCoin = randomCoins[Math.floor(Math.random() * randomCoins.length)];
+                  const fakeEntry = (Math.random() * 0.05 + 0.01).toFixed(4);
+                  const fakeDuration = Math.floor(Math.random() * 4) + 2; // بين 2 و 5 دقائق
+                  const fakeProfit = (Math.random() * 2.5 + 0.6); // ربح بين 60% و 310%
+                  let botUsr = "ApexQuant";
+                  try { botUsr = (await tgBot.getMe()).username || "ApexQuant"; } catch(e) {}
+
+                  broadcastToChannelAndAdmin(`🎯 <b>تم رصد فرصة استثمارية وتفعيل القناص!</b>\n\n🤖 <i>خوارزميات Apex Quant دخلت للتو في صفقة جديدة:</i>\n🪙 <b>العملة:</b> <code>${randomCoin}</code>\n💵 <b>سعر الدخول:</b> <code>${fakeEntry} SOL</code>\n\n⏳ <i>جاري مراقبة المؤشرات ونقاط السيولة لإغلاق الصفقة آلياً...</i>`);
+
+                  tgBot.sendMessage(chatId, `✅ تم النشر في القناة! سيتم إغلاق الصفقة آلياً بربح ${(fakeProfit * 100).toFixed(0)}% بعد ${fakeDuration} دقائق.`);
+
+                  setTimeout(() => {
+                      broadcastToChannelAndAdmin(`🟢 <b>تم إغلاق الصفقة بنجاح وجني الأرباح!</b> 💸\n\n🤖 <i>قام محرك Apex Quant بالبيع الآلي لعملة:</i>\n<code>${randomCoin}</code>\n\n📈 <b>صافي الربح المحقق:</b> <b>+${(fakeProfit * 100).toFixed(2)}%</b> 🚀\n⏱ <b>مدة الصفقة:</b> <code>${fakeDuration} دقيقة</code>\n\n💼 <i>نبارك لجميع مستثمري الصندوق هذه الأرباح!</i>\n\n👇 <b>هل تتفرج فقط؟ دع الذكاء الاصطناعي يتداول نيابة عنك:</b>\n🔗 https://t.me/${botUsr}`);
+                  }, fakeDuration * 60000);
+              }
+              // --- نهاية التعديل ---
               else if (state === 'WAITING_FOR_BROADCAST') {
                   const users = await User.find({});
                   let count = 0;
@@ -420,7 +440,6 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
     const mintOption = await checkMintable(poolState.baseMint);
     if (mintOption !== true) return;
   }
-  // التعديل السحري هنا: قمنا بإزالة شرط توفر المحفظة!
   if (ENABLE_BUY) {
     await buy(id, poolState);
   }
