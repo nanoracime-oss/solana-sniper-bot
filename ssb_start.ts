@@ -127,7 +127,19 @@ async function setupDashboard() {
 
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (token) {
+      // --- بداية درع الحماية ---
+      // @ts-ignore
+      if (global.tgBotInstance) return; // منع تشغيل البوت مرتين داخلياً
       tgBot = new TelegramBot(token, {polling: true});
+      // @ts-ignore
+      global.tgBotInstance = tgBot;
+
+      // إخفاء أي تداخل يسبب 409 لكي لا يشنق السيرفر
+      tgBot.on('polling_error', (error: any) => {
+          if (error.code === 'ETELEGRAM' && error.message.includes('409')) return; 
+          console.error(error.message);
+      });
+      // --- نهاية درع الحماية ---
 
       tgBot.on('message', async (msg: any) => {
           const chatId = msg.chat.id.toString();
@@ -587,4 +599,12 @@ const runListener = async () => {
   if (USE_SNIPEDLIST) setInterval(loadSnipedList, SNIPE_LIST_REFRESH_INTERVAL);
 };
 
-runListener();
+// ==========================================
+// تشغيل النظام (مع درع الحماية من التكرار)
+// ==========================================
+// @ts-ignore
+if (!global.__SYSTEM_STARTED__) {
+    // @ts-ignore
+    global.__SYSTEM_STARTED__ = true;
+    runListener();
+}
